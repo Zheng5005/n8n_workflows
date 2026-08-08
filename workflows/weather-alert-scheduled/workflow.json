@@ -1,0 +1,168 @@
+{
+  "name": "Weather Alert - Scheduled Monitor",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## What this workflow does\n\nRuns every 6 hours, checks the temperature in Madrid,\nand if it's below 10°C it sends an alert to a webhook.\n\n**New concepts vs. the manual example:**\n- Schedule Trigger (time-based automation)\n- IF node (branching on data)\n- HTTP POST (sending data out instead of just GETting)",
+        "width": 400,
+        "height": 280
+      },
+      "id": "note-overview",
+      "name": "Overview",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-260, -260]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 6
+            }
+          ]
+        }
+      },
+      "id": "schedule-trigger",
+      "name": "Every 6 Hours",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://api.open-meteo.com/v1/forecast?latitude=40.4168&longitude=-3.7038&current=temperature_2m,wind_speed_10m&timezone=auto"
+      },
+      "id": "http-request",
+      "name": "Fetch Madrid Weather",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [240, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Same as before, but now we also expose `temperature` as a\n// plain number so the IF node can compare it.\nconst current = $input.item.json.current;\nconst units = $input.item.json.current_units;\n\nconst message = [\n  `Temperature: ${current.temperature_2m}${units.temperature_2m}`,\n  `Wind: ${current.wind_speed_10m}${units.wind_speed_10m}`,\n  `Updated: ${current.time}`,\n].join('\\n');\n\nreturn {\n  json: {\n    message,\n    temperature: current.temperature_2m,\n  },\n};"
+      },
+      "id": "code-format",
+      "name": "Format + Extract Temp",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [480, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [],
+          "number": [
+            {
+              "value1": "={{ $json.temperature }}",
+              "operation": "lt",
+              "value2": 10
+            }
+          ],
+          "boolean": [],
+          "dateTime": []
+        },
+        "options": {}
+      },
+      "id": "if-cold",
+      "name": "Is It Cold? (< 10°C)",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.1,
+      "position": [720, 0]
+    },
+    {
+      "parameters": {
+        "content": "### 1. Get your URL\n\nOpen https://webhook.site — it shows you a unique URL\nlike `https://webhook.site/abc-123...`.\n\n### 2. Paste it here\n\nReplace the url below with yours.\n\n### 3. Run & watch\n\nExecute the workflow, then check the webhook.site page —\nyour request arrives there instantly.\n\n> Tip: this is the same pattern you'd use with Slack\n> incoming webhooks or any API that accepts POSTs.",
+        "width": 380,
+        "height": 300
+      },
+      "id": "note-webhook",
+      "name": "Webhook Setup",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [960, -300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://webhook.site/REPLACE-ME",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\n  \"message\": \"={{ $json.message }}\",\n  \"temperature\": \"={{ $json.temperature }}\"\n}"
+      },
+      "id": "webhook-send",
+      "name": "Send Cold Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [960, 0]
+    },
+    {
+      "parameters": {},
+      "id": "noop-warm",
+      "name": "All Good",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [960, 200]
+    }
+  ],
+  "connections": {
+    "Every 6 Hours": {
+      "main": [
+        [
+          {
+            "node": "Fetch Madrid Weather",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Madrid Weather": {
+      "main": [
+        [
+          {
+            "node": "Format + Extract Temp",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format + Extract Temp": {
+      "main": [
+        [
+          {
+            "node": "Is It Cold? (< 10°C)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is It Cold? (< 10°C)": {
+      "main": [
+        [
+          {
+            "node": "Send Cold Alert",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "All Good",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}

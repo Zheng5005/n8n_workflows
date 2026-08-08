@@ -1,0 +1,172 @@
+{
+  "name": "Weather Alert - Telegram",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## What this workflow does\n\nRuns every 6 hours, checks the temperature in Madrid,\nand if it's below 10°C it sends you a Telegram message.\n\n**New concepts vs. the webhook version:**\n- Credentials: the bot token lives in n8n's credential store,\n  NOT in this file (that's why it's GitHub-safe)\n- Telegram node: sends a message to your chat",
+        "width": 400,
+        "height": 280
+      },
+      "id": "note-overview",
+      "name": "Overview",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-260, -260]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 6
+            }
+          ]
+        }
+      },
+      "id": "schedule-trigger",
+      "name": "Every 6 Hours",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://api.open-meteo.com/v1/forecast?latitude=40.4168&longitude=-3.7038&current=temperature_2m,wind_speed_10m&timezone=auto"
+      },
+      "id": "http-request",
+      "name": "Fetch Madrid Weather",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [240, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Same as before, but now we also expose `temperature` as a\n// plain number so the IF node can compare it.\nconst current = $input.item.json.current;\nconst units = $input.item.json.current_units;\n\nconst message = [\n  `Temperature: ${current.temperature_2m}${units.temperature_2m}`,\n  `Wind: ${current.wind_speed_10m}${units.wind_speed_10m}`,\n  `Updated: ${current.time}`,\n].join('\\n');\n\nreturn {\n  json: {\n    message,\n    temperature: current.temperature_2m,\n  },\n};"
+      },
+      "id": "code-format",
+      "name": "Format + Extract Temp",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [480, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [],
+          "number": [
+            {
+              "value1": "={{ $json.temperature }}",
+              "operation": "lt",
+              "value2": 10
+            }
+          ],
+          "boolean": [],
+          "dateTime": []
+        },
+        "options": {}
+      },
+      "id": "if-cold",
+      "name": "Is It Cold? (< 10°C)",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.1,
+      "position": [720, 0]
+    },
+    {
+      "parameters": {
+        "content": "### Setup (one time, ~3 minutes)\n\n**1. Create the bot** — talk to @BotFather on Telegram:\n`/newbot`, pick a name, and copy the token it gives you.\n\n**2. Get your chat ID** — message your bot once, then\nask @userinfobot for your ID (a number).\n\n**3. Create the credential in n8n** —\nSettings > Credentials > Add credential >\n\"Telegram API\" > paste the token.\n\n**4. Attach it here** — click the credential dropdown\non this node and pick it.\n\n**5. Replace the chat ID** below.\n\n> The token never goes in this file — only in n8n's\n> credential store. That's why this file is GitHub-safe.",
+        "width": 380,
+        "height": 340
+      },
+      "id": "note-telegram",
+      "name": "Telegram Setup",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [960, -300]
+    },
+    {
+      "parameters": {
+        "operation": "sendMessage",
+        "chatId": "REPLACE_WITH_CHAT_ID",
+        "text": "=COLD ALERT - Madrid\\n\\n{{ $json.message }}"
+      },
+      "id": "telegram-send",
+      "name": "Send Telegram Alert",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.1,
+      "position": [960, 0],
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_WITH_TELEGRAM_CREDENTIAL_ID",
+          "name": "REPLACE_WITH_TELEGRAM_CREDENTIAL_NAME"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "noop-warm",
+      "name": "All Good",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [960, 200]
+    }
+  ],
+  "connections": {
+    "Every 6 Hours": {
+      "main": [
+        [
+          {
+            "node": "Fetch Madrid Weather",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Madrid Weather": {
+      "main": [
+        [
+          {
+            "node": "Format + Extract Temp",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format + Extract Temp": {
+      "main": [
+        [
+          {
+            "node": "Is It Cold? (< 10°C)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is It Cold? (< 10°C)": {
+      "main": [
+        [
+          {
+            "node": "Send Telegram Alert",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "All Good",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}
