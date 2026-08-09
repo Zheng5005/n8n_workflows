@@ -1,0 +1,794 @@
+{
+  "name": "WhatsApp Booking Bot - Google Calendar",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## What this workflow does\n\nA WhatsApp Business bot that books appointments in a Google\nCalendar. The customer chats with an option-driven menu\n(no AI): choose a service, pick a date, pick a free time\nslot, type their name, and confirm. The slot is created in\nyour Google Calendar and a confirmation message is sent back.\n\n**New concepts vs. the previous workflows:**\n- Webhook trigger with two HTTP methods: GET (Meta's\n  verification challenge) and POST (inbound messages)\n- Respond to Webhook node to echo the challenge back\n- Conversation state per phone number kept in\n  $getWorkflowStaticData('global')\n- Google Calendar Availability (Booked Slots) + a Code node\n  that computes the free time slots\n- Google Calendar Create to book the confirmed appointment\n- HTTP Request node as the single WhatsApp message sink",
+        "width": 420,
+        "height": 320
+      },
+      "id": "sticky-overview",
+      "name": "Overview",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-280, -760]
+    },
+    {
+      "parameters": {
+        "content": "### Setup (one time, ~20 minutes)\n\n1. Publish n8n to a public HTTPS URL (WhatsApp requires it)\n2. In the Meta Developer Portal create an app with a WhatsApp\n   Business number; copy the phone number ID and an access token\n3. Add the webhook URL\n   https://<your-n8n-host>/webhook/whatsapp-booking\n   and use the verify token below\n4. Create a Header Auth credential (Name: Authorization,\n   Value: Bearer <access token>) and attach it to\n   the Send WhatsApp Message node\n5. Connect a Google Calendar OAuth2 credential to the\n   two calendar nodes\n6. Replace the REPLACE_WITH_* values in the Verify Challenge\n   node and in the Config node\n\n> No secrets live in this file. Tokens go into n8n's\n> encrypted credential store, never in workflow.json.",
+        "width": 420,
+        "height": 320
+      },
+      "id": "sticky-setup",
+      "name": "Setup",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-280, -380]
+    },
+    {
+      "parameters": {
+        "path": "whatsapp-booking",
+        "responseMode": "responseNode",
+        "multipleMethods": true,
+        "httpMethod": ["GET", "POST"],
+        "options": {}
+      },
+      "id": "webhook-whatsapp",
+      "name": "WhatsApp Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "webhookId": "whatsapp-booking"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Meta verifies the webhook endpoint with a GET request that\n// includes hub.verify_token. If it matches, we must echo back\n// hub.challenge so Meta enables the subscription.\nconst query = $input.item.json.query ?? {};\n\nconst expectedToken = 'REPLACE_WITH_VERIFY_TOKEN';\nconst mode = query['hub.mode'];\nconst token = query['hub.verify_token'];\nconst challenge = query['hub.challenge'];\n\nif (mode === 'subscribe' && token === expectedToken && challenge) {\n  return { json: { status: 'verified', challenge } };\n}\n\nreturn {\n  json: { status: 'rejected', reason: 'verify_token mismatch or missing challenge' },\n};"
+      },
+      "id": "verify-challenge",
+      "name": "Verify Challenge",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [260, -380]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.status }}",
+              "operation": "equal",
+              "value2": "verified"
+            }
+          ],
+          "number": [],
+          "boolean": [],
+          "dateTime": []
+        },
+        "options": {}
+      },
+      "id": "challenge-verified",
+      "name": "Challenge Verified?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.1,
+      "position": [520, -380]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "content": "={{ $json.challenge }}",
+        "options": {
+          "responseCode": 200,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "text/plain; charset=utf-8"
+              }
+            ]
+          }
+        }
+      },
+      "id": "respond-challenge",
+      "name": "Respond Challenge",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [780, -520]
+    },
+    {
+      "parameters": {
+        "respondWith": "noData",
+        "options": {
+          "responseCode": 403
+        }
+      },
+      "id": "respond-verification-failed",
+      "name": "Respond Verification Failed",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [780, -240]
+    },
+    {
+      "parameters": {
+        "jsCode": "// The WhatsApp Business Cloud API delivers messages as a deeply\n// nested JSON payload. Here we flatten only the fields the bot\n// needs: who wrote, what they wrote, and the event type.\nconst body = $input.item.json.body ?? {};\nconst change = body?.entry?.[0]?.changes?.[0] ?? {};\nconst value = change.value ?? {};\nconst contact = value.contacts?.[0] ?? {};\nconst message = value.messages?.[0];\n\nreturn {\n  json: {\n    phone: message ? message.from : null,\n    messageId: message ? message.id : null,\n    name: contact.profile?.name ?? null,\n    text: message?.text?.body ?? null,\n    eventType: value.messages ? 'message' : value.statuses ? 'status' : 'unknown',\n  },\n};"
+      },
+      "id": "extract-inbound",
+      "name": "Extract Inbound",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [260, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Business configuration. Replace the placeholders with your own\n// values. utcOffsetMinutes is the business time zone offset in\n// minutes (negative for west of UTC), e.g. El Salvador = -360.\nreturn {\n  json: {\n    businessName: 'REPLACE_WITH_BUSINESS_NAME',\n    calendarId: 'REPLACE_WITH_CALENDAR_ID',\n    phoneNumberId: 'REPLACE_WITH_PHONE_NUMBER_ID',\n    openingHour: 9,\n    closingHour: 18,\n    slotMinutes: 30,\n    utcOffsetMinutes: -360,\n    services: [\n      { id: 1, name: 'Consulta medica', duration: 30 },\n      { id: 2, name: 'Asesoramiento', duration: 60 },\n    ],\n  },\n};"
+      },
+      "id": "config",
+      "name": "Config",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [520, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Keeps one conversation per phone number in workflow static\n// data. 'menu' is the fallback step for any phone that has\n// never written before, so a stale or unknown step is repaired\n// automatically. Status events (delivered/read) and messages\n// without text are routed to the 'ignore' step.\nconst state = $getWorkflowStaticData('global');\nconst item = $input.item.json;\nconst phone = item.phone;\n\nif (item.eventType !== 'message' || !phone || !item.text) {\n  return { json: { step: 'ignore', phone } };\n}\n\nconst text = String(item.text).trim();\nstate[phone] = state[phone] ?? { step: 'menu', data: {} };\nconst session = state[phone];\n\nconst resets = ['menu', 'cancel', 'salir', 'reiniciar', '0'];\nif (resets.includes(text.toLowerCase())) {\n  session.step = 'menu';\n  session.data = {};\n}\n\nreturn {\n  json: {\n    step: session.step,\n    phone,\n    name: item.name,\n    text,\n    data: session.data,\n  },\n};"
+      },
+      "id": "state-machine",
+      "name": "State Machine",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [780, 0]
+    },
+    {
+      "parameters": {
+        "mode": "rules",
+        "dataType": "string",
+        "value1": "={{ $json.step }}",
+        "rules": {
+          "rules": [
+            {
+              "operation": "equal",
+              "value2": "menu",
+              "outputKey": "menu"
+            },
+            {
+              "operation": "equal",
+              "value2": "service",
+              "outputKey": "service"
+            },
+            {
+              "operation": "equal",
+              "value2": "date",
+              "outputKey": "date"
+            },
+            {
+              "operation": "equal",
+              "value2": "time",
+              "outputKey": "time"
+            },
+            {
+              "operation": "equal",
+              "value2": "name",
+              "outputKey": "name"
+            },
+            {
+              "operation": "equal",
+              "value2": "confirm",
+              "outputKey": "confirm"
+            },
+            {
+              "operation": "equal",
+              "value2": "ignore",
+              "outputKey": "ignore"
+            }
+          ]
+        },
+        "fallbackOutput": -1
+      },
+      "id": "step-router",
+      "name": "Step Router",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 2,
+      "position": [1040, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Shows the main menu. If the user already typed an option,\n// advance directly instead of repeating the menu.\nconst state = $getWorkflowStaticData('global');\nconst session = state[$json.phone];\nconst cfg = $('Config').first().json;\nconst text = $json.text.toLowerCase();\nconst name = $json.name;\n\nif (text === '1') {\n  session.step = 'service';\n  const lines = cfg.services.map((s) => `${s.id}. ${s.name}`);\n  return {\n    json: {\n      phone: $json.phone,\n      reply: [\n        `Perfecto${name ? ', ' + name : ''}. Que servicio desea reservar?`,\n        lines.join('\\n'),\n        'Responda con el numero de la opcion.',\n      ].join('\\n\\n'),\n    },\n  };\n}\n\nif (text === '0') {\n  session.step = 'menu';\n  session.data = {};\n  return {\n    json: {\n      phone: $json.phone,\n      reply: 'Gracias por escribirnos. Hasta pronto!',\n    },\n    };\n}\n\n// Keep the conversation on the 'menu' step until the user picks\n// \"Reservar\" (1) or \"Salir\" (0), so a greeting + '1' is not\n// misread as a service choice.\nreturn {\n    json: {\n      phone: $json.phone,\n      reply: [\n      `Hola${name ? ' ' + name : ''}, bienvenido/a a ${cfg.businessName}.`,\n      'Que desea hacer?',\n      '1. Reservar una cita',\n      '0. Salir',\n      'Responda con el numero de la opcion.',\n    ].join('\\n'),\n  },\n};"
+      },
+      "id": "handle-menu",
+      "name": "Handle Menu",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1300, -280]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Reads the chosen service. Valid options advance to the date\n// step; anything else re-asks with the list of services.\nconst state = $getWorkflowStaticData('global');\nconst session = state[$json.phone];\nconst cfg = $('Config').first().json;\nconst choice = parseInt($json.text, 10);\nconst service = cfg.services.find((s) => s.id === choice);\n\nif (!service) {\n  const lines = cfg.services.map((s) => `${s.id}. ${s.name}`);\n  return {\n    json: {\n      phone: $json.phone,\n      reply: [\n        'No reconoci esa opcion. Elija uno de los servicios disponibles:',\n        lines.join('\\n'),\n        'Responda con el numero de la opcion.',\n      ].join('\\n\\n'),\n    },\n  };\n}\n\nsession.data.service = service;\nsession.step = 'date';\nreturn {\n  json: {\n    phone: $json.phone,\n    reply: 'Para que fecha desea la cita? (formato DD/MM/AAAA, por ejemplo 25/12/2026)',\n  },\n};"
+      },
+      "id": "handle-service",
+      "name": "Handle Service",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1300, -20]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parses DD/MM/YYYY and computes the day window in UTC using the\n// business time zone offset. Invalid dates produce a re-ask reply\n// (status 'invalid') that skips the calendar call.\nconst state = $getWorkflowStaticData('global');\nconst session = state[$json.phone];\nconst cfg = $('Config').first().json;\nconst text = $json.text.trim();\nconst match = /^(\\d{2})\\/(\\d{2})\\/(\\d{4})$/.exec(text);\n\nif (!match) {\n  return {\n    json: {\n      phone: $json.phone,\n      status: 'invalid',\n      reply: 'No entendi la fecha. Use el formato DD/MM/AAAA, por ejemplo 25/12/2026.',\n    },\n  };\n}\n\nconst [, dd, mm, yyyy] = match;\nconst dateKey = `${yyyy}-${mm}-${dd}`;\nconst dayStartUtc = new Date(\n  Date.parse(`${dateKey}T00:00:00Z`) - cfg.utcOffsetMinutes * 60000,\n).toISOString();\nconst dayEndUtc = new Date(\n  Date.parse(`${dateKey}T00:00:00Z`) - cfg.utcOffsetMinutes * 60000 + 24 * 3600 * 1000,\n).toISOString();\nconst durationMinutes = session.data.service?.duration ?? cfg.slotMinutes;\n\nsession.data.dateKey = dateKey;\nsession.data.serviceId = session.data.service?.id;\n\nreturn {\n  json: {\n    phone: $json.phone,\n    status: 'ok',\n    dateKey,\n    dayStart: dayStartUtc,\n    dayEnd: dayEndUtc,\n    durationMinutes,\n  },\n};"
+      },
+      "id": "handle-date",
+      "name": "Handle Date",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1300, 240]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.status }}",
+              "operation": "equal",
+              "value2": "ok"
+            }
+          ],
+          "number": [],
+          "boolean": [],
+          "dateTime": []
+        },
+        "options": {}
+      },
+      "id": "date-valid",
+      "name": "Date Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.1,
+      "position": [1560, 240]
+    },
+    {
+      "parameters": {
+        "resource": "calendar",
+        "operation": "availability",
+        "calendar": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $('Config').item.json.calendarId }}"
+        },
+        "timeMin": "={{ $json.dayStart }}",
+        "timeMax": "={{ $json.dayEnd }}",
+        "options": {
+          "outputFormat": "bookedSlots"
+        }
+      },
+      "id": "check-day-availability",
+      "name": "Check Day Availability",
+      "type": "n8n-nodes-base.googleCalendar",
+      "typeVersion": 1.3,
+      "position": [1820, 100],
+      "credentials": {
+        "googleCalendarOAuth2Api": {
+          "id": "REPLACE_WITH_GOOGLE_CALENDAR_CREDENTIAL_ID",
+          "name": "REPLACE_WITH_GOOGLE_CALENDAR_CREDENTIAL_NAME"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Computes the free time slots for the day by removing the busy\n// ranges returned by the Availability node. Slot length comes\n// from the chosen service duration. All math runs in UTC using\n// the business offset from the Config node.\nconst cfg = $('Config').first().json;\nconst date = $('Handle Date').first().json;\nconst phone = date.phone;\nconst durationMinutes = date.durationMinutes ?? cfg.slotMinutes;\n\nconst busy = $input\n  .all()\n  .map((item) =>\n    item.json.start\n      ? { start: Date.parse(item.json.start), end: Date.parse(item.json.end) }\n      : null,\n  )\n  .filter((item) => item !== null);\n\nconst dayStart = Date.parse(`${date.dateKey}T00:00:00Z`) - cfg.utcOffsetMinutes * 60000;\nconst slotMs = durationMinutes * 60000;\nconst slots = [];\n\nfor (\n  let start = dayStart + cfg.openingHour * 3600000;\n  start + slotMs <= dayStart + cfg.closingHour * 3600000;\n  start += slotMs\n) {\n  const end = start + slotMs;\n  const clashes = busy.some((b) => start < b.end && end > b.start);\n  if (!clashes) {\n    slots.push({\n      start: new Date(start).toISOString(),\n      end: new Date(end).toISOString(),\n    });\n  }\n}\n\nreturn {\n  json: {\n    phone,\n    dateKey: date.dateKey,\n    slots,\n    slotsCount: slots.length,\n  },\n};"
+      },
+      "id": "compute-free-slots",
+      "name": "Compute Free Slots",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2080, 100]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [],
+          "number": [
+            {
+              "value1": "={{ $json.slotsCount }}",
+              "operation": "larger",
+              "value2": 0
+            }
+          ],
+          "boolean": [],
+          "dateTime": []
+        },
+        "options": {}
+      },
+      "id": "slots-available",
+      "name": "Slots Available?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.1,
+      "position": [2340, 100]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Lists the free slots and stores them in the conversation state\n// so the time step can validate the user's choice against them.\nconst state = $getWorkflowStaticData('global');\nconst session = state[$json.phone];\nconst cfg = $('Config').first().json;\n\nconst formatLocal = (iso) =>\n  new Date(Date.parse(iso) + cfg.utcOffsetMinutes * 60000).toISOString().slice(11, 16);\n\nsession.data.slots = $json.slots;\nsession.step = 'time';\n\nconst lines = $json.slots.map((slot, i) => `${i + 1}. ${formatLocal(slot.start)} hs`);\n\nreturn {\n  json: {\n    phone: $json.phone,\n    reply: [\n      `Horarios disponibles para el ${$json.dateKey}:`,\n      lines.join('\\n'),\n      'Responda con el numero del horario que prefiera.',\n    ].join('\\n\\n'),\n  },\n};"
+      },
+      "id": "show-slots",
+      "name": "Show Slots",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2600, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "// No free slot for the chosen day: go back to the date step.\nconst state = $getWorkflowStaticData('global');\nstate[$json.phone].step = 'date';\n\nreturn {\n  json: {\n    phone: $json.phone,\n    reply: `No quedan horarios disponibles para el ${$json.dateKey}. Elija otra fecha (DD/MM/AAAA).`,\n  },\n};"
+      },
+      "id": "handle-no-slots",
+      "name": "Handle No Slots",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2600, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Validates the chosen slot number against the list shown in the\n// previous message, then moves to the name step.\nconst state = $getWorkflowStaticData('global');\nconst session = state[$json.phone];\nconst cfg = $('Config').first().json;\nconst slots = session.data.slots ?? [];\nconst choice = parseInt($json.text, 10);\n\nconst formatLocal = (iso) =>\n  new Date(Date.parse(iso) + cfg.utcOffsetMinutes * 60000).toISOString().slice(11, 16);\n\nif (!Number.isInteger(choice) || choice < 1 || choice > slots.length) {\n  const lines = slots.map((slot, i) => `${i + 1}. ${formatLocal(slot.start)} hs`);\n  return {\n    json: {\n      phone: $json.phone,\n      reply: ['No reconoci esa opcion. Elija un horario de la lista:', lines.join('\\n')].join('\\n\\n'),\n    },\n  };\n}\n\nsession.data.time = slots[choice - 1];\nsession.step = 'name';\nreturn {\n  json: {\n    phone: $json.phone,\n    reply: 'Perfecto. Cual es su nombre completo?',\n  },\n};"
+      },
+      "id": "handle-time",
+      "name": "Handle Time",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1300, 500]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Stores the customer name and shows the confirmation summary.\nconst state = $getWorkflowStaticData('global');\nconst session = state[$json.phone];\nconst cfg = $('Config').first().json;\nconst name = $json.text.trim();\n\nif (!name || name.length < 2) {\n  return {\n    json: {\n      phone: $json.phone,\n      reply: 'Por favor escriba su nombre completo.',\n    },\n  };\n}\n\nsession.data.name = name;\nsession.step = 'confirm';\n\nconst formatLocal = (iso) =>\n  new Date(Date.parse(iso) + cfg.utcOffsetMinutes * 60000).toISOString().slice(11, 16);\nconst slot = session.data.time ?? {};\nconst serviceName = session.data.service?.name ?? '';\n\nreturn {\n  json: {\n    phone: $json.phone,\n    reply: [\n      'Confirme los datos de su cita:',\n      `Servicio: ${serviceName}`,\n      `Fecha: ${session.data.dateKey}`,\n      `Horario: ${formatLocal(slot.start)} hs`,\n      `Nombre: ${name}`,\n      '',\n      'Responda 1 para confirmar o 2 para cancelar.',\n    ].join('\\n'),\n  },\n};"
+      },
+      "id": "handle-name",
+      "name": "Handle Name",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1300, 760]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 1 = confirm, 2 = cancel. Anything else re-asks. The confirmed\n// item carries every field the calendar node needs.\nconst state = $getWorkflowStaticData('global');\nconst session = state[$json.phone];\nconst cfg = $('Config').first().json;\nconst text = $json.text.trim();\n\nconst formatLocal = (iso) =>\n  new Date(Date.parse(iso) + cfg.utcOffsetMinutes * 60000).toISOString().slice(11, 16);\nconst slot = session.data.time ?? {};\n\nif (text === '1') {\n  return {\n    json: {\n      phone: $json.phone,\n      status: 'confirmed',\n      start: slot.start,\n      end: slot.end,\n      serviceName: session.data.service?.name ?? '',\n      dateKey: session.data.dateKey ?? '',\n      name: session.data.name ?? '',\n    },\n  };\n}\n\nif (text === '2') {\n  session.step = 'menu';\n  session.data = {};\n  return {\n    json: {\n      phone: $json.phone,\n      status: 'cancelled',\n      reply: 'Cita cancelada. Envie 1 cuando quiera reservar nuevamente.',\n    },\n  };\n}\n\nreturn {\n  json: {\n    phone: $json.phone,\n    status: 'invalid',\n    reply: 'Por favor responda 1 para confirmar o 2 para cancelar.',\n  },\n};"
+      },
+      "id": "handle-confirm",
+      "name": "Handle Confirm",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1300, 1020]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.status }}",
+              "operation": "equal",
+              "value2": "confirmed"
+            }
+          ],
+          "number": [],
+          "boolean": [],
+          "dateTime": []
+        },
+        "options": {}
+      },
+      "id": "confirmed",
+      "name": "Confirmed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.1,
+      "position": [1560, 1020]
+    },
+    {
+      "parameters": {
+        "resource": "event",
+        "operation": "create",
+        "calendar": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $('Config').item.json.calendarId }}"
+        },
+        "start": "={{ $json.start }}",
+        "end": "={{ $json.end }}",
+        "useDefaultReminders": true,
+        "additionalFields": {
+          "summary": "={{ 'Cita: ' + $json.serviceName }}",
+          "description": "={{ 'Cliente: ' + $json.name + ' | Servicio: ' + $json.serviceName }}"
+        }
+      },
+      "id": "create-booking",
+      "name": "Create Booking",
+      "type": "n8n-nodes-base.googleCalendar",
+      "typeVersion": 1.3,
+      "position": [1820, 920],
+      "credentials": {
+        "googleCalendarOAuth2Api": {
+          "id": "REPLACE_WITH_GOOGLE_CALENDAR_CREDENTIAL_ID",
+          "name": "REPLACE_WITH_GOOGLE_CALENDAR_CREDENTIAL_NAME"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Builds the confirmation message after the calendar event was\n// created, then resets the conversation to the menu.\nconst input = $('Handle Confirm').first().json;\nconst cfg = $('Config').first().json;\n\nconst formatLocal = (iso) =>\n  new Date(Date.parse(iso) + cfg.utcOffsetMinutes * 60000).toISOString().slice(11, 16);\n\nconst state = $getWorkflowStaticData('global');\nstate[input.phone].step = 'menu';\nstate[input.phone].data = {};\n\nreturn {\n  json: {\n    phone: input.phone,\n    reply: [\n      'Su cita fue confirmada.',\n      `Servicio: ${input.serviceName}`,\n      `Fecha: ${input.dateKey}`,\n      `Horario: ${formatLocal(input.start)} hs`,\n      'Nos vemos pronto!',\n    ].join('\\n'),\n  },\n};"
+      },
+      "id": "booking-result",
+      "name": "Booking Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2080, 920]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v21.0/{{ $('Config').item.json.phoneNumberId }}/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ messaging_product: 'whatsapp', to: $json.phone, type: 'text', text: { body: $json.reply } }",
+        "options": {}
+      },
+      "id": "send-whatsapp-message",
+      "name": "Send WhatsApp Message",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2600, 480],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_WHATSAPP_CREDENTIAL_ID",
+          "name": "REPLACE_WITH_WHATSAPP_CREDENTIAL_NAME"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "noData",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "respond-ok",
+      "name": "Respond OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [2880, 480]
+    }
+  ],
+  "connections": {
+    "WhatsApp Webhook": {
+      "main": [
+        [
+          {
+            "node": "Verify Challenge",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Extract Inbound",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify Challenge": {
+      "main": [
+        [
+          {
+            "node": "Challenge Verified?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Challenge Verified?": {
+      "main": [
+        [
+          {
+            "node": "Respond Challenge",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond Verification Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Inbound": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "State Machine",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "State Machine": {
+      "main": [
+        [
+          {
+            "node": "Step Router",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Step Router": {
+      "main": [
+        [
+          {
+            "node": "Handle Menu",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Handle Service",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Handle Date",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Handle Time",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Handle Name",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Handle Confirm",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond OK",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Handle Menu": {
+      "main": [
+        [
+          {
+            "node": "Send WhatsApp Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Handle Service": {
+      "main": [
+        [
+          {
+            "node": "Send WhatsApp Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Handle Date": {
+      "main": [
+        [
+          {
+            "node": "Date Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Date Valid?": {
+      "main": [
+        [
+          {
+            "node": "Check Day Availability",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send WhatsApp Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Day Availability": {
+      "main": [
+        [
+          {
+            "node": "Compute Free Slots",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compute Free Slots": {
+      "main": [
+        [
+          {
+            "node": "Slots Available?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slots Available?": {
+      "main": [
+        [
+          {
+            "node": "Show Slots",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Handle No Slots",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Show Slots": {
+      "main": [
+        [
+          {
+            "node": "Send WhatsApp Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Handle No Slots": {
+      "main": [
+        [
+          {
+            "node": "Send WhatsApp Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Handle Time": {
+      "main": [
+        [
+          {
+            "node": "Send WhatsApp Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Handle Name": {
+      "main": [
+        [
+          {
+            "node": "Send WhatsApp Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Handle Confirm": {
+      "main": [
+        [
+          {
+            "node": "Confirmed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Confirmed?": {
+      "main": [
+        [
+          {
+            "node": "Create Booking",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send WhatsApp Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Booking": {
+      "main": [
+        [
+          {
+            "node": "Booking Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Booking Result": {
+      "main": [
+        [
+          {
+            "node": "Send WhatsApp Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send WhatsApp Message": {
+      "main": [
+        [
+          {
+            "node": "Respond OK",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}
