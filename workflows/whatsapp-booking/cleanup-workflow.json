@@ -1,0 +1,117 @@
+{
+  "name": "WhatsApp Booking - Reservation Cleanup",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## Reservation cleanup\n\nMaintains the `reservations` table used by the WhatsApp Booking\nbot to guard against double-booking:\n\n- **Ensure Table** creates the table if it does not exist (idempotent)\n- **Prune Stale** deletes pending reservations older than 30 minutes\n\nRuns every 15 minutes. The bot inserts a pending reservation when\na customer confirms a slot, then deletes it if the calendar event\ncannot be created. Rows that survive a successful booking or an\naborted flow are removed here so the table never grows unbounded.",
+        "width": 420,
+        "height": 300
+      },
+      "id": "sticky-cleanup-overview",
+      "name": "Overview",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-280, -560]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 15
+            }
+          ]
+        }
+      },
+      "id": "cleanup-schedule-trigger",
+      "name": "Every 15 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "CREATE TABLE IF NOT EXISTS reservations (\n  slot_start timestamptz NOT NULL,\n  slot_end   timestamptz NOT NULL,\n  phone      text NOT NULL,\n  status     text NOT NULL DEFAULT 'pending',\n  created_at timestamptz NOT NULL DEFAULT now(),\n  PRIMARY KEY (slot_start, slot_end)\n);",
+        "options": {}
+      },
+      "id": "cleanup-ensure-table",
+      "name": "Ensure Table",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [260, 0],
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_WITH_POSTGRES_CREDENTIAL_ID",
+          "name": "REPLACE_WITH_POSTGRES_CREDENTIAL_NAME"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "DELETE FROM reservations\nWHERE status = 'pending'\n  AND created_at < now() - interval '30 minutes';",
+        "options": {}
+      },
+      "id": "cleanup-prune-stale",
+      "name": "Prune Stale",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [520, 0],
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_WITH_POSTGRES_CREDENTIAL_ID",
+          "name": "REPLACE_WITH_POSTGRES_CREDENTIAL_NAME"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "cleanup-done",
+      "name": "Done",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [780, 0]
+    }
+  ],
+  "connections": {
+    "Every 15 Minutes": {
+      "main": [
+        [
+          {
+            "node": "Ensure Table",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ensure Table": {
+      "main": [
+        [
+          {
+            "node": "Prune Stale",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prune Stale": {
+      "main": [
+        [
+          {
+            "node": "Done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}

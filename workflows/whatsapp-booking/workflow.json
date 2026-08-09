@@ -119,7 +119,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Business configuration. Replace the placeholders with your own\n// values. utcOffsetMinutes is the business time zone offset in\n// minutes (negative for west of UTC), e.g. El Salvador = -360.\nreturn {\n  json: {\n    businessName: 'REPLACE_WITH_BUSINESS_NAME',\n    calendarId: 'REPLACE_WITH_CALENDAR_ID',\n    phoneNumberId: 'REPLACE_WITH_PHONE_NUMBER_ID',\n    openingHour: 9,\n    closingHour: 18,\n    slotMinutes: 30,\n    utcOffsetMinutes: -360,\n    services: [\n      { id: 1, name: 'Consulta medica', duration: 30 },\n      { id: 2, name: 'Asesoramiento', duration: 60 },\n    ],\n  },\n};"
+        "jsCode": "// Business configuration. Replace the placeholders with your own\n// values. utcOffsetMinutes is the business time zone offset in\n// minutes (negative for west of UTC), e.g. El Salvador = -360.\n//\n// Concurrency: on confirm the workflow atomically reserves the slot\n// in a PostgreSQL 'reservations' table (see README) before creating\n// the calendar event. No new config values are needed for it — the\n// table is created and pruned by the companion cleanup workflow\n// (cleanup-workflow.json).\nreturn {\n  json: {\n    businessName: 'REPLACE_WITH_BUSINESS_NAME',\n    calendarId: 'REPLACE_WITH_CALENDAR_ID',\n    phoneNumberId: 'REPLACE_WITH_PHONE_NUMBER_ID',\n    openingHour: 9,\n    closingHour: 18,\n    slotMinutes: 30,\n    utcOffsetMinutes: -360,\n    services: [\n      { id: 1, name: 'Consulta medica', duration: 30 },\n      { id: 2, name: 'Asesoramiento', duration: 60 },\n    ],\n  },\n};"
       },
       "id": "config",
       "name": "Config",
@@ -270,7 +270,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Computes the free time slots for the day by removing the busy\n// ranges returned by the Availability node. Slot length comes\n// from the chosen service duration. All math runs in UTC using\n// the business offset from the Config node.\nconst cfg = $('Config').first().json;\nconst date = $('Handle Date').first().json;\nconst phone = date.phone;\nconst durationMinutes = date.durationMinutes ?? cfg.slotMinutes;\n\nconst busy = $input\n  .all()\n  .map((item) =>\n    item.json.start\n      ? { start: Date.parse(item.json.start), end: Date.parse(item.json.end) }\n      : null,\n  )\n  .filter((item) => item !== null);\n\nconst dayStart = Date.parse(`${date.dateKey}T00:00:00Z`) - cfg.utcOffsetMinutes * 60000;\nconst slotMs = durationMinutes * 60000;\nconst slots = [];\n\nfor (\n  let start = dayStart + cfg.openingHour * 3600000;\n  start + slotMs <= dayStart + cfg.closingHour * 3600000;\n  start += slotMs\n) {\n  const end = start + slotMs;\n  const clashes = busy.some((b) => start < b.end && end > b.start);\n  if (!clashes) {\n    slots.push({\n      start: new Date(start).toISOString(),\n      end: new Date(end).toISOString(),\n    });\n  }\n}\n\nreturn {\n  json: {\n    phone,\n    dateKey: date.dateKey,\n    slots,\n    slotsCount: slots.length,\n  },\n};"
+        "jsCode": "// Computes the free time slots for the day by removing the busy\n// ranges returned by the Availability node. Slot length comes\n// from the chosen service duration. All math runs in UTC using\n// the business offset from the Config node.\n//\n// The day context (phone/dateKey/duration) is read from whichever\n// upstream node produced it: Handle Date on the normal path, or\n// Re-offer Slots after a lost reservation. The Availability node\n// only outputs the busy ranges, so it cannot carry this context\n// and $json only ever holds a busy-slot item here.\nconst cfg = $('Config').first().json;\nconst date = $('Handle Date').isExecuted\n  ? $('Handle Date').first().json\n  : $('Re-offer Slots').first().json;\nconst phone = date.phone;\nconst durationMinutes = date.durationMinutes ?? cfg.slotMinutes;\n\nconst busy = $input\n  .all()\n  .map((item) =>\n    item.json.start\n      ? { start: Date.parse(item.json.start), end: Date.parse(item.json.end) }\n      : null,\n  )\n  .filter((item) => item !== null);\n\nconst dayStart = Date.parse(`${date.dateKey}T00:00:00Z`) - cfg.utcOffsetMinutes * 60000;\nconst slotMs = durationMinutes * 60000;\nconst slots = [];\n\nfor (\n  let start = dayStart + cfg.openingHour * 3600000;\n  start + slotMs <= dayStart + cfg.closingHour * 3600000;\n  start += slotMs\n) {\n  const end = start + slotMs;\n  const clashes = busy.some((b) => start < b.end && end > b.start);\n  if (!clashes) {\n    slots.push({\n      start: new Date(start).toISOString(),\n      end: new Date(end).toISOString(),\n    });\n  }\n}\n\nreturn {\n  json: {\n    phone,\n    dateKey: date.dateKey,\n    slots,\n    slotsCount: slots.length,\n  },\n};"
       },
       "id": "compute-free-slots",
       "name": "Compute Free Slots",
@@ -374,6 +374,28 @@
     },
     {
       "parameters": {
+        "conditions": {
+          "string": [],
+          "number": [],
+          "boolean": [
+            {
+              "value1": "={{ $json.status }}",
+              "operation": "equal",
+              "value2": "confirmed"
+            }
+          ],
+          "dateTime": []
+        },
+        "options": {}
+      },
+      "id": "booking-succeeded",
+      "name": "Booking Succeeded?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.1,
+      "position": [2860, 920]
+    },
+    {
+      "parameters": {
         "resource": "event",
         "operation": "create",
         "calendar": {
@@ -381,25 +403,121 @@
           "mode": "id",
           "value": "={{ $('Config').item.json.calendarId }}"
         },
-        "start": "={{ $json.start }}",
-        "end": "={{ $json.end }}",
+        "start": "={{ $('Handle Confirm').first().json.start }}",
+        "end": "={{ $('Handle Confirm').first().json.end }}",
         "useDefaultReminders": true,
         "additionalFields": {
-          "summary": "={{ 'Cita: ' + $json.serviceName }}",
-          "description": "={{ 'Cliente: ' + $json.name + ' | Servicio: ' + $json.serviceName }}"
+          "summary": "={{ 'Cita: ' + $('Handle Confirm').first().json.serviceName }}",
+          "description": "={{ 'Cliente: ' + $('Handle Confirm').first().json.name + ' | Servicio: ' + $('Handle Confirm').first().json.serviceName }}"
         }
       },
       "id": "create-booking",
       "name": "Create Booking",
       "type": "n8n-nodes-base.googleCalendar",
       "typeVersion": 1.3,
-      "position": [1820, 920],
+      "position": [2860, 1100],
       "credentials": {
         "googleCalendarOAuth2Api": {
           "id": "REPLACE_WITH_GOOGLE_CALENDAR_CREDENTIAL_ID",
           "name": "REPLACE_WITH_GOOGLE_CALENDAR_CREDENTIAL_NAME"
         }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO reservations (slot_start, slot_end, phone, status) VALUES ($1, $2, $3, 'pending') RETURNING id, true AS available;",
+        "options": {
+          "queryReplacement": "={{ [$('Handle Confirm').first().json.start, $('Handle Confirm').first().json.end, $('Handle Confirm').first().json.phone] }}"
+        }
+      },
+      "id": "reserve-slot",
+      "name": "Reserve Slot",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [3220, 1100],
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_WITH_POSTGRES_CREDENTIAL_ID",
+          "name": "REPLACE_WITH_POSTGRES_CREDENTIAL_NAME"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [],
+          "number": [],
+          "boolean": [
+            {
+              "value1": "={{ $json.available }}",
+              "operation": "equal",
+              "value2": true
+            }
+          ],
+          "dateTime": []
+        },
+        "options": {}
+      },
+      "id": "if-inserted",
+      "name": "IF Inserted?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.1,
+      "position": [3580, 1100]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "DELETE FROM reservations WHERE slot_start = $1 AND slot_end = $2 AND phone = $3;",
+        "options": {
+          "queryReplacement": "={{ [$('Handle Confirm').first().json.start, $('Handle Confirm').first().json.end, $('Handle Confirm').first().json.phone] }}"
+        }
+      },
+      "id": "release-reservation",
+      "name": "Release Reservation",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [3940, 1180],
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_WITH_POSTGRES_CREDENTIAL_ID",
+          "name": "REPLACE_WITH_POSTGRES_CREDENTIAL_NAME"
+        }
       }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Calendar create failed even though the slot was atomically\n// reserved. The reservation was already rolled back by the\n// Release Reservation node, so tell the customer to retry.\nconst input = $('Handle Confirm').first().json;\n\nreturn {\n  json: {\n    phone: input.phone,\n    reply: [\n      'Lo sentimos, no pudimos confirmar su cita.',\n      'Hubo un error al reservar su horario.',\n      'Por favor intentelo de nuevo en unos minutos.',\n    ].join('\\n'),\n  },\n};"
+      },
+      "id": "booking-failed",
+      "name": "Booking Failed",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3940, 960]
+    },
+    {
+      "parameters": {
+        "jsCode": "// The chosen slot was already taken by someone else. Tells the\n// customer and re-lists the free slots by re-entering the existing\n// day-availability chain (Re-offer Slots -> Check Day Availability\n// -> Compute Free Slots -> Show Slots).\nconst input = $('Handle Confirm').first().json;\nconst cfg = $('Config').first().json;\n\nconst formatLocal = (iso) =>\n  new Date(Date.parse(iso) + cfg.utcOffsetMinutes * 60000).toISOString().slice(11, 16);\n\nconst state = $getWorkflowStaticData('global');\nconst session = state[input.phone];\n\n// The day window and service duration never reached the session\n// state (Handle Date only carries them on its output item), so\n// recompute them here exactly like Handle Date does.\nconst dayStart = new Date(\n  Date.parse(`${input.dateKey}T00:00:00Z`) - cfg.utcOffsetMinutes * 60000,\n).toISOString();\nconst dayEnd = new Date(\n  Date.parse(`${input.dateKey}T00:00:00Z`) - cfg.utcOffsetMinutes * 60000 + 24 * 3600 * 1000,\n).toISOString();\nconst durationMinutes = session.data.service?.duration ?? cfg.slotMinutes;\n\n// Preview of the previously listed slots (minus the one just taken);\n// the authoritative fresh list is sent by Show Slots right after.\nconst next = (session.data.slots ?? []).filter((s) => s.start !== input.start);\nconst lines = next.map((slot) => formatLocal(slot.start)).slice(0, 3);\nconst alt = lines.length\n  ? ['Alternativas disponibles:', ...lines.map((t) => `- ${t}`)].join('\\n')\n  : 'No quedan mas horarios disponibles para esa fecha.';\n\nreturn {\n  json: {\n    phone: input.phone,\n    dateKey: input.dateKey,\n    dayStart,\n    dayEnd,\n    durationMinutes,\n    reply: [\n      'Ese horario acaba de ser reservado por otra persona.',\n      alt,\n      'Responda con el numero del horario que prefiera.',\n    ].join('\\n'),\n  },\n};"
+      },
+      "id": "re-offer-slots",
+      "name": "Re-offer Slots",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3580, 880]
+    },
+    {
+      "parameters": {
+        "content": "## Concurrency guard\n\nOn confirm, the slot is atomically reserved in a PostgreSQL\n`reservations` table BEFORE the calendar event is created:\n\n- **Reserve Slot** inserts the pending reservation\n  (the DB rejects duplicates, so two customers can never\n  grab the same slot at the same time)\n- **IF Inserted?** branches on whether the insert succeeded\n- **Create Booking** only runs after a successful insert\n- **Release Reservation** deletes the pending row if the\n  calendar create fails, so the slot can be booked again\n- **Re-offer Slots** offers the next free slots when the\n  chosen slot was already taken\n\nThe Postgres tables are created and stale reservations\npruned by the companion cleanup workflow.",
+        "width": 420,
+        "height": 320
+      },
+      "id": "sticky-concurrency",
+      "name": "Concurrency",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [3220, 760]
     },
     {
       "parameters": {
@@ -739,7 +857,7 @@
       "main": [
         [
           {
-            "node": "Create Booking",
+            "node": "Reserve Slot",
             "type": "main",
             "index": 0
           }
@@ -757,7 +875,87 @@
       "main": [
         [
           {
+            "node": "Booking Succeeded?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Booking Succeeded?": {
+      "main": [
+        [
+          {
             "node": "Booking Result",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Release Reservation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Release Reservation": {
+      "main": [
+        [
+          {
+            "node": "Booking Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Booking Failed": {
+      "main": [
+        [
+          {
+            "node": "Send WhatsApp Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reserve Slot": {
+      "main": [
+        [
+          {
+            "node": "IF Inserted?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF Inserted?": {
+      "main": [
+        [
+          {
+            "node": "Create Booking",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Re-offer Slots",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Re-offer Slots": {
+      "main": [
+        [
+          {
+            "node": "Check Day Availability",
             "type": "main",
             "index": 0
           }

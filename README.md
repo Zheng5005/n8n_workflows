@@ -11,7 +11,7 @@ workflows/
 ├── weather-example/            # Manual trigger -> HTTP request -> Code node
 ├── weather-alert-scheduled/    # + Schedule trigger, IF branching, webhook alert
 ├── weather-alert-telegram/     # + Telegram notification with credentials
-└── whatsapp-booking/           # Webhook + state machine + Google Calendar booking
+└── whatsapp-booking/           # Webhook + state machine + Google Calendar booking + Postgres guard
 ```
 
 Each workflow README covers:
@@ -54,7 +54,7 @@ Every workflow needs slightly different setup — some need a webhook URL, some 
 | [weather-example](workflows/weather-example/) | Manual | HTTP GET (Open-Meteo) | — | — | Triggers, `json` data shape, Code node |
 | [weather-alert-scheduled](workflows/weather-alert-scheduled/) | Schedule (every 6h) | HTTP GET | IF (temp < 10°C) | Webhook POST | Cron, branching, sending data out |
 | [weather-alert-telegram](workflows/weather-alert-telegram/) | Schedule (every 6h) | HTTP GET | IF (temp < 10°C) | Telegram message | Credentials, chat app integrations |
-| [whatsapp-booking](workflows/whatsapp-booking/) | Webhook (GET + POST) | Google Calendar (availability, create) | IF + Switch on conversation state | WhatsApp message (HTTP) | Webhooks, conversation state, scheduling a real event |
+| [whatsapp-booking](workflows/whatsapp-booking/) | Webhook (GET + POST) | Google Calendar (availability, create) | IF + Switch on conversation state | WhatsApp message (HTTP) | Webhooks, conversation state, scheduling a real event, DB constraint as a concurrency guard |
 
 Diff adjacent pairs to see exactly what changes as a workflow grows.
 
