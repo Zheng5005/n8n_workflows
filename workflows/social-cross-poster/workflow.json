@@ -1,0 +1,338 @@
+{
+  "name": "Social Cross-Poster - Facebook, Instagram, X, LinkedIn",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## What this workflow does\n\nYou write the post once — text, an optional image URL, and\nhashtags — and this workflow publishes it to a Facebook Page,\nan Instagram Business account, X, and LinkedIn. Each platform\ngets its own text adaptation, and each platform fails\nindependently without blocking the others.\n\n**New concepts vs. the previous workflows:**\n- Code node as the single content/config source\n- Per-platform text adaptation (X 280 chars, Instagram 2200)\n- IF branching + Merge (append) to rejoin both paths\n- onError: continueRegularOutput — one platform failing\n  never stops the others\n- Native node (X) vs raw HTTP Request (Meta Graph API,\n  LinkedIn UGC) — use the native node when it handles\n  OAuth2 signing for you",
+        "width": 420,
+        "height": 300
+      },
+      "id": "note-overview",
+      "name": "Overview",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-260, -360]
+    },
+    {
+      "parameters": {
+        "content": "### Setup (one time, ~15 minutes)\n\n1. Create 3 credentials in n8n — Settings > Credentials >\n   Add credential: \"Facebook Graph API\", \"X (Twitter)\n   OAuth2 API\", \"LinkedIn OAuth2 API\"\n2. Attach them to the Facebook/Instagram, X, and LinkedIn\n   nodes (the nodes show REPLACE_WITH_* until you do)\n3. Replace the REPLACE_WITH_* values in Prepare Post:\n   post text, image URL, page ID, Instagram Business\n   User ID, LinkedIn author URN\n\n> The full steps live in the README.",
+        "width": 420,
+        "height": 260
+      },
+      "id": "note-setup",
+      "name": "Setup",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-260, 20]
+    },
+    {
+      "parameters": {},
+      "id": "manual-trigger",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ---------------------------------------------------------------------\n// Edit this node before each run: the post content and the account IDs.\n// (In production you would replace the Manual Trigger with a Form,\n// Airtable row, or webhook and read these fields from the trigger.)\n// ---------------------------------------------------------------------\n\n// 1. The content\nconst text = 'REPLACE_WITH_POST_TEXT';\nconst imageUrl = 'REPLACE_WITH_IMAGE_URL_OR_LEAVE_EMPTY'; // public URL, Meta fetches it\nconst hashtags = ['#n8n', '#automation'];\n\n// 2. The accounts (replace with your own IDs)\nconst pageId = 'REPLACE_WITH_FACEBOOK_PAGE_ID';\nconst instagramUserId = 'REPLACE_WITH_INSTAGRAM_BUSINESS_USER_ID';\nconst linkedInAuthorUrn = 'REPLACE_WITH_LINKEDIN_AUTHOR_URN'; // urn:li:person:xxx or urn:li:organization:xxx\n\nconst withTags = (body) => `${body} ${hashtags.join(' ')}`.trim();\nconst truncate = (s, max) => (s.length <= max ? s : s.slice(0, max - 1) + '...');\n\nreturn {\n  json: {\n    // Content\n    text,\n    imageUrl,\n    hasImage: Boolean(imageUrl),\n    // Per-platform text (Instagram captions max 2200, X posts max 280)\n    facebookText: withTags(text),\n    instagramCaption: truncate(withTags(text), 2200),\n    xText: truncate(withTags(text), 280),\n    linkedInText: withTags(text),\n    // Account IDs\n    pageId,\n    instagramUserId,\n    linkedInAuthorUrn,\n  },\n};"
+      },
+      "id": "prepare-post",
+      "name": "Prepare Post",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [280, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [],
+          "number": [],
+          "boolean": [
+            {
+              "value1": "={{ $json.hasImage }}",
+              "operation": "equal",
+              "value2": true
+            }
+          ],
+          "dateTime": []
+        },
+        "options": {}
+      },
+      "id": "if-has-image",
+      "name": "Has Image?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.1,
+      "position": [560, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v21.0/{{ $('Prepare Post').item.json.pageId }}/photos",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ url: $('Prepare Post').item.json.imageUrl, caption: $('Prepare Post').item.json.facebookText }",
+        "options": {}
+      },
+      "id": "fb-post-photo",
+      "name": "Facebook: Post Photo",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [840, 0],
+      "credentials": {
+        "facebookGraphApi": {
+          "id": "REPLACE_WITH_FACEBOOK_CREDENTIAL_ID",
+          "name": "REPLACE_WITH_FACEBOOK_CREDENTIAL_NAME"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v21.0/{{ $('Prepare Post').item.json.instagramUserId }}/media",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ image_url: $('Prepare Post').item.json.imageUrl, caption: $('Prepare Post').item.json.instagramCaption }",
+        "options": {}
+      },
+      "id": "ig-create-container",
+      "name": "Instagram: Create Container",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1120, 0],
+      "credentials": {
+        "facebookGraphApi": {
+          "id": "REPLACE_WITH_FACEBOOK_CREDENTIAL_ID",
+          "name": "REPLACE_WITH_FACEBOOK_CREDENTIAL_NAME"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v21.0/{{ $('Instagram: Create Container').item.json.id }}/publish",
+        "options": {}
+      },
+      "id": "ig-publish-container",
+      "name": "Instagram: Publish Container",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1400, 0],
+      "credentials": {
+        "facebookGraphApi": {
+          "id": "REPLACE_WITH_FACEBOOK_CREDENTIAL_ID",
+          "name": "REPLACE_WITH_FACEBOOK_CREDENTIAL_NAME"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v21.0/{{ $('Prepare Post').item.json.pageId }}/feed",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ message: $('Prepare Post').item.json.facebookText }",
+        "options": {}
+      },
+      "id": "fb-post-text",
+      "name": "Facebook: Post Text",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [840, 260],
+      "credentials": {
+        "facebookGraphApi": {
+          "id": "REPLACE_WITH_FACEBOOK_CREDENTIAL_ID",
+          "name": "REPLACE_WITH_FACEBOOK_CREDENTIAL_NAME"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "append"
+      },
+      "id": "merge-branches",
+      "name": "Merge Branches",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [1680, 0]
+    },
+    {
+      "parameters": {
+        "resource": "tweet",
+        "operation": "create",
+        "text": "={{ $json.xText }}"
+      },
+      "id": "x-post-tweet",
+      "name": "X: Post Tweet",
+      "type": "n8n-nodes-base.twitter",
+      "typeVersion": 2,
+      "position": [1960, 0],
+      "credentials": {
+        "twitterOAuth2Api": {
+          "id": "REPLACE_WITH_X_CREDENTIAL_ID",
+          "name": "REPLACE_WITH_X_CREDENTIAL_NAME"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.linkedin.com/v2/ugcPosts",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ author: $('Prepare Post').item.json.linkedInAuthorUrn, lifecycleState: 'PUBLISHED', specificContent: { 'com.linkedin.ugc.ShareContent': { shareCommentary: { text: $('Prepare Post').item.json.linkedInText }, shareMediaCategory: 'NONE' } }, visibility: { 'com.linkedin.ugc.MemberNetworkVisibility': 'PUBLIC' } }",
+        "options": {}
+      },
+      "id": "li-post-update",
+      "name": "LinkedIn: Post Update",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2240, 0],
+      "credentials": {
+        "linkedInOAuth2Api": {
+          "id": "REPLACE_WITH_LINKEDIN_CREDENTIAL_ID",
+          "name": "REPLACE_WITH_LINKEDIN_CREDENTIAL_NAME"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Reports what actually happened per platform. Nodes that never ran\n// (e.g. the Instagram pair when there is no image) show as 'skipped'.\n// A platform that failed is marked 'failed' with the error detail, but\n// the workflow kept going thanks to onError: continueRegularOutput.\n//\n// Facebook runs two different nodes depending on the branch (photo vs\n// text). Prefer the Post Photo result when it succeeded, otherwise fall\n// back to Post Text, so the summary always reports the post that ran.\n\nconst get = (nodeName) => {\n  try {\n    const ref = $(nodeName);\n    return ref ? ref.item.json : null;\n  } catch (e) {\n    return null;\n  }\n};\n\nconst summarize = (platform, nodeName) => {\n  const data = get(nodeName);\n  if (!data) return { platform, status: 'skipped' };\n  if (data.error) {\n    const detail = typeof data.error === 'string' ? data.error : JSON.stringify(data.error);\n    return { platform, status: 'failed', detail };\n  }\n  return { platform, status: 'ok', id: data.id ?? null };\n};\n\nconst photo = summarize('Facebook', 'Facebook: Post Photo');\nconst text = summarize('Facebook', 'Facebook: Post Text');\nconst facebook = photo.status === 'ok' ? photo : text.status !== 'skipped' ? text : photo;\n\nreturn {\n  json: {\n    facebook,\n    instagram: summarize('Instagram', 'Instagram: Publish Container'),\n    x: summarize('X', 'X: Post Tweet'),\n    linkedin: summarize('LinkedIn', 'LinkedIn: Post Update'),\n  },\n};"
+      },
+      "id": "post-summary",
+      "name": "Post Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2520, 0]
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Prepare Post",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Post": {
+      "main": [
+        [
+          {
+            "node": "Has Image?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Image?": {
+      "main": [
+        [
+          {
+            "node": "Facebook: Post Photo",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Facebook: Post Text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Facebook: Post Photo": {
+      "main": [
+        [
+          {
+            "node": "Instagram: Create Container",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Instagram: Create Container": {
+      "main": [
+        [
+          {
+            "node": "Instagram: Publish Container",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Instagram: Publish Container": {
+      "main": [
+        [
+          {
+            "node": "Merge Branches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Facebook: Post Text": {
+      "main": [
+        [
+          {
+            "node": "Merge Branches",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge Branches": {
+      "main": [
+        [
+          {
+            "node": "X: Post Tweet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "X: Post Tweet": {
+      "main": [
+        [
+          {
+            "node": "LinkedIn: Post Update",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LinkedIn: Post Update": {
+      "main": [
+        [
+          {
+            "node": "Post Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}
