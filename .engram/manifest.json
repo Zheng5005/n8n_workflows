@@ -24,6 +24,14 @@
       "sessions": 5,
       "memories": 9,
       "prompts": 0
+    },
+    {
+      "id": "8017b14a",
+      "created_by": "zheng005",
+      "created_at": "2026-08-11T23:09:49Z",
+      "sessions": 0,
+      "memories": 1,
+      "prompts": 0
     }
   ]
 }

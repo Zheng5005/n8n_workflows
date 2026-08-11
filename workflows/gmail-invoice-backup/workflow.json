@@ -1,0 +1,383 @@
+{
+  "name": "Invoice Backup - Gmail to Google Drive",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## What this workflow does\n\nPolls Gmail every 5 minutes for UNREAD emails with attachments\nwhose subject contains invoice keywords. For each PDF attachment:\n\n1. Finds (or creates) a monthly folder inside \"Invoice Backups\"\n2. Uploads the PDF there\n3. Labels the email \"Invoice Backup\" and marks it read\n\n**New concepts vs. the weather examples:**\n- Polling trigger with a Gmail search query (`q`)\n- Binary data handling (attachments)\n- Auto-creating folders (with a real Google API call)\n- Credentials: Google OAuth2 (Gmail + Drive)\n- Parallel branches re-joined with a Merge node",
+        "width": 440,
+        "height": 300
+      },
+      "id": "note-overview",
+      "name": "Overview",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-340, -340]
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "event": "messageReceived",
+        "simple": false,
+        "maxResults": 10,
+        "options": {
+          "downloadAttachments": true,
+          "dataPropertyAttachmentsPrefixName": "attachment_"
+        },
+        "filters": {
+          "readStatus": "unread",
+          "q": "has:attachment subject:(invoice OR factura)"
+        }
+      },
+      "id": "gmail-trigger",
+      "name": "Gmail Trigger",
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.4,
+      "position": [0, 0],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "REPLACE_WITH_GMAIL_CREDENTIAL_ID",
+          "name": "REPLACE_WITH_GMAIL_CREDENTIAL_NAME"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Input: one item per email from the Gmail Trigger (attachments downloaded).\n// Each email has metadata in `json` and binary attachments as\n// `attachment_0`, `attachment_1`, ...\n//\n// We keep ONLY PDF attachments and create ONE output item per PDF,\n// so each file can be uploaded separately.\nconst items = $input.all();\nconst results = [];\n\nfor (const item of items) {\n  const json = item.json;\n  const binary = item.binary || {};\n\n  const pdfKeys = Object.keys(binary).filter((key) => {\n    const b = binary[key];\n    const isPdfMime = b && b.mimeType === 'application/pdf';\n    const isPdfName = b && b.fileName && b.fileName.toLowerCase().endsWith('.pdf');\n    return isPdfMime || isPdfName;\n  });\n\n  if (pdfKeys.length === 0) continue; // no PDFs -> this email is ignored\n\n  const emailDate = json.date ? new Date(json.date) : new Date();\n  const monthFolderName =\n    emailDate.getFullYear() + '-' + String(emailDate.getMonth() + 1).padStart(2, '0');\n\n  const from = typeof json.from === 'object' ? json.from.text : json.from;\n\n  for (const key of pdfKeys) {\n    results.push({\n      json: {\n        messageId: json.id,\n        subject: json.subject || '(no subject)',\n        from: from || '',\n        fileName: binary[key].fileName || 'attachment.pdf',\n        monthFolderName,\n      },\n      binary: {\n        data: binary[key],\n      },\n    });\n  }\n}\n\nreturn results;"
+      },
+      "id": "code-prepare",
+      "name": "Prepare PDF Attachments",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [260, 0]
+    },
+    {
+      "parameters": {
+        "mode": "binaryToJson",
+        "setAllData": false,
+        "sourceKey": "data",
+        "destinationKey": "attachmentData"
+      },
+      "id": "move-binary-hold",
+      "name": "Carry Binary as JSON",
+      "type": "n8n-nodes-base.moveBinaryData",
+      "typeVersion": 1,
+      "position": [520, 0]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://www.googleapis.com/drive/v3/files",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleDriveOAuth2Api",
+        "sendQuery": true,
+        "specifyQuery": "keypair",
+        "queryParameters": [
+          {
+            "name": "q",
+            "value": "=name = '{{ $json.monthFolderName }}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+          },
+          {
+            "name": "fields",
+            "value": "files(id,name)"
+          }
+        ]
+      },
+      "id": "http-find-folder",
+      "name": "Find Month Folder",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [520, 260],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "REPLACE_WITH_DRIVE_CREDENTIAL_ID",
+          "name": "REPLACE_WITH_DRIVE_CREDENTIAL_NAME"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [],
+          "number": [
+            {
+              "value1": "={{ $json.files.length }}",
+              "operation": "gt",
+              "value2": 0
+            }
+          ],
+          "boolean": [],
+          "dateTime": []
+        },
+        "options": {}
+      },
+      "id": "if-folder-exists",
+      "name": "Month Folder Exists?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.1,
+      "position": [780, 260]
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "resource": "folder",
+        "operation": "create",
+        "name": "={{ $('Prepare PDF Attachments').first().json.monthFolderName }}",
+        "driveId": {
+          "mode": "list",
+          "value": "My Drive"
+        },
+        "folderId": {
+          "mode": "url",
+          "value": "https://drive.google.com/drive/folders/REPLACE_WITH_INVOICE_BACKUPS_FOLDER_URL"
+        }
+      },
+      "id": "drive-create-folder",
+      "name": "Create Month Folder",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [780, 520],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "REPLACE_WITH_DRIVE_CREDENTIAL_ID",
+          "name": "REPLACE_WITH_DRIVE_CREDENTIAL_NAME"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition"
+      },
+      "id": "merge-folder-id",
+      "name": "Combine Folder ID",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [1040, 0]
+    },
+    {
+      "parameters": {
+        "mode": "jsonToBinary",
+        "convertAllData": false,
+        "sourceKey": "attachmentData",
+        "destinationKey": "data",
+        "options": {
+          "dataIsBase64": true
+        }
+      },
+      "id": "move-binary-restore",
+      "name": "Restore Binary",
+      "type": "n8n-nodes-base.moveBinaryData",
+      "typeVersion": 1,
+      "position": [1300, 0]
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "resource": "file",
+        "operation": "upload",
+        "inputDataFieldName": "data",
+        "name": "={{ $json.fileName }}",
+        "driveId": {
+          "mode": "list",
+          "value": "My Drive"
+        },
+        "folderId": {
+          "mode": "id",
+          "value": "={{ $json.files ? $json.files[0].id : $json.id }}"
+        }
+      },
+      "id": "drive-upload",
+      "name": "Upload Invoice",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [1560, 0],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "REPLACE_WITH_DRIVE_CREDENTIAL_ID",
+          "name": "REPLACE_WITH_DRIVE_CREDENTIAL_NAME"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "resource": "message",
+        "operation": "addLabels",
+        "messageId": "={{ $json.messageId }}",
+        "labelIds": [
+          "REPLACE_WITH_LABEL_ID"
+        ]
+      },
+      "id": "gmail-label",
+      "name": "Add Invoice Backup Label",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [1820, 0],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "REPLACE_WITH_GMAIL_CREDENTIAL_ID",
+          "name": "REPLACE_WITH_GMAIL_CREDENTIAL_NAME"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "resource": "message",
+        "operation": "markAsRead",
+        "messageId": "={{ $json.messageId }}"
+      },
+      "id": "gmail-read",
+      "name": "Mark as Read",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [2080, 0],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "REPLACE_WITH_GMAIL_CREDENTIAL_ID",
+          "name": "REPLACE_WITH_GMAIL_CREDENTIAL_NAME"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## Why a raw HTTP call for the folder lookup?\n\nThe dedicated \"Search\" node returns NOTHING when a folder is missing,\nand an empty output silently ends the branch - so \"create if missing\"\nwould never run. The raw Drive API always returns an item\n(`{ files: [...] }`), so the IF node can branch on it.\n\n## Why \"Carry Binary as JSON\"?\n\nMost nodes build NEW items (HTTP, Drive) and DROP binary attachments.\nMoveBinaryData stores the file as a base64 string in JSON, which\nsurvives those nodes. The Merge re-joins the original data with the\nfolder ID, and \"Restore Binary\" turns it back into a real file.",
+        "width": 440,
+        "height": 300
+      },
+      "id": "note-folder-magic",
+      "name": "How the Folder Magic Works",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [520, 620]
+    }
+  ],
+  "connections": {
+    "Gmail Trigger": {
+      "main": [
+        [
+          {
+            "node": "Prepare PDF Attachments",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare PDF Attachments": {
+      "main": [
+        [
+          {
+            "node": "Carry Binary as JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Carry Binary as JSON": {
+      "main": [
+        [
+          {
+            "node": "Combine Folder ID",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Find Month Folder",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find Month Folder": {
+      "main": [
+        [
+          {
+            "node": "Month Folder Exists?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Month Folder Exists?": {
+      "main": [
+        [
+          {
+            "node": "Combine Folder ID",
+            "type": "main",
+            "index": 1
+          }
+        ],
+        [
+          {
+            "node": "Create Month Folder",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Month Folder": {
+      "main": [
+        [
+          {
+            "node": "Combine Folder ID",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Combine Folder ID": {
+      "main": [
+        [
+          {
+            "node": "Restore Binary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Restore Binary": {
+      "main": [
+        [
+          {
+            "node": "Upload Invoice",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upload Invoice": {
+      "main": [
+        [
+          {
+            "node": "Add Invoice Backup Label",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Add Invoice Backup Label": {
+      "main": [
+        [
+          {
+            "node": "Mark as Read",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}
