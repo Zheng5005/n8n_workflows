@@ -13,6 +13,7 @@ workflows/
 ├── weather-alert-telegram/     # + Telegram notification with credentials
 ├── whatsapp-booking/           # Webhook + state machine + Google Calendar booking + Postgres guard
 ├── social-cross-poster/        # Cross-post to Facebook, Instagram, X, LinkedIn with per-platform text
+├── morning-assistant/          # Daily briefing email: schedule + Google Calendar/Tasks + weather + SMTP
 └── gmail-invoice-backup/       # Gmail trigger -> PDF filtering -> auto-created Drive folders
 ```
 
@@ -58,6 +59,7 @@ Every workflow needs slightly different setup — some need a webhook URL, some 
 | [weather-alert-telegram](workflows/weather-alert-telegram/) | Schedule (every 6h) | HTTP GET | IF (temp < 10°C) | Telegram message | Credentials, chat app integrations |
 | [whatsapp-booking](workflows/whatsapp-booking/) | Webhook (GET + POST) | Google Calendar (availability, create) | IF + Switch on conversation state | WhatsApp message (HTTP) | Webhooks, conversation state, scheduling a real event, DB constraint as a concurrency guard |
 | [social-cross-poster](workflows/social-cross-poster/) | Manual | Code (per-platform text) | IF + Merge (image / no image) | Facebook, Instagram, X, LinkedIn | Cross-posting, continue-on-error, per-platform message adaptation |
+| [morning-assistant](workflows/morning-assistant/) | Schedule (daily 7 AM, workflow timezone) | Google Calendar + Google Tasks + HTTP GET (Open-Meteo) | — | Email (SMTP) | Workflow timezone, `$now` day bounds, `executeOnce`, continue-on-error on data sources, Gmail app password |
 | [gmail-invoice-backup](workflows/gmail-invoice-backup/) | Gmail polling (unread, subject query) | Email PDF attachments (binary) | IF (folder exists) + Merge (parallel branches) | Google Drive upload | Binary data, MoveBinaryData, folder auto-creation via raw API, OAuth2 credentials |
 
 Diff adjacent pairs to see exactly what changes as a workflow grows.

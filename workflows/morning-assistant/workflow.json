@@ -1,0 +1,265 @@
+{
+  "name": "Morning Assistant - Daily Briefing",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## What this workflow does\n\nEvery day at 7:00 AM it collects what the day has in store\nand emails a single text summary:\n- Today's Google Calendar events\n- Current weather in San Salvador (Open-Meteo, no API key)\n- Pending Google Tasks (due today or overdue)\n\nBuild Summary merges the three sources into one email that\nGmail SMTP delivers to your inbox.\n\nIt runs in the workflow timezone (America/El_Salvador):\nsettings.timezone drives both the schedule trigger and the\n$now day bounds computed by the Code nodes.",
+        "width": 420,
+        "height": 320
+      },
+      "id": "sticky-overview",
+      "name": "Overview",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -120,
+        -180
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### Setup (one time, ~10 minutes)\n\nThree n8n credentials are needed:\n1. Google Calendar OAuth2 -> Fetch Calendar\n2. Google Tasks OAuth2     -> Fetch Tasks\n3. SMTP (Gmail app password) -> Send Email\n\nReplace the REPLACE_WITH_* placeholders:\n- REPLACE_WITH_SENDER_EMAIL / REPLACE_WITH_RECIPIENT_EMAIL\n  in Send Email\n- the credential IDs on Fetch Tasks, Fetch Calendar and\n  Send Email\n\n> No secrets live in this file. Credentials go into n8n's\n> encrypted credential store, never in workflow.json.",
+        "width": 420,
+        "height": 320
+      },
+      "id": "sticky-setup",
+      "name": "Setup",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        360,
+        -180
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "days",
+              "daysInterval": 1,
+              "triggerAtHour": 7,
+              "triggerAtMinute": 0
+            }
+          ]
+        }
+      },
+      "id": "schedule-daily",
+      "name": "Every Day at 7 AM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 2,
+      "position": [
+        0,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Today's bounds in the workflow timezone (America/El_Salvador, UTC-6, no DST).\n// $now is a Luxon DateTime in the workflow timezone.\nconst dayStart = $now.startOf('day');\nconst dayEnd = dayStart.plus({ days: 1 }).minus({ milliseconds: 1 });\n\nconst todayLabel = new Intl.DateTimeFormat('es-SV', {\n  timeZone: 'America/El_Salvador',\n  weekday: 'long',\n  day: 'numeric',\n  month: 'long',\n  year: 'numeric',\n}).format(new Date($now.toMillis()));\n\nreturn [{ json: { dayStartISO: dayStart.toISO(), dayEndISO: dayEnd.toISO(), todayLabel } }];"
+      },
+      "id": "day-bounds",
+      "name": "Day Bounds",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "executeOnce": true,
+      "position": [
+        260,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://api.open-meteo.com/v1/forecast?latitude=13.6929&longitude=-89.2182&current=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,weather_code,wind_speed_10m&timezone=auto",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "fetch-weather",
+      "name": "Fetch Weather",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        520,
+        220
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "resource": "task",
+        "operation": "getAll",
+        "task": "@default",
+        "returnAll": true,
+        "additionalFields": {
+          "showCompleted": false,
+          "dueMax": "={{ $('Day Bounds').item.json.dayEndISO }}"
+        }
+      },
+      "id": "fetch-tasks",
+      "name": "Fetch Tasks",
+      "type": "n8n-nodes-base.googleTasks",
+      "typeVersion": 1,
+      "executeOnce": true,
+      "position": [
+        780,
+        220
+      ],
+      "credentials": {
+        "googleTasksOAuth2Api": {
+          "id": "REPLACE_WITH_GOOGLE_TASKS_CREDENTIAL_ID",
+          "name": "Google Tasks account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "resource": "event",
+        "operation": "getAll",
+        "calendar": {
+          "__rl": true,
+          "mode": "list",
+          "value": "primary"
+        },
+        "timeMin": "={{ $('Day Bounds').item.json.dayStartISO }}",
+        "timeMax": "={{ $('Day Bounds').item.json.dayEndISO }}",
+        "returnAll": true,
+        "options": {
+          "recurringEventHandling": "expand"
+        }
+      },
+      "id": "fetch-calendar",
+      "name": "Fetch Calendar",
+      "type": "n8n-nodes-base.googleCalendar",
+      "typeVersion": 1.3,
+      "executeOnce": true,
+      "position": [
+        1040,
+        220
+      ],
+      "credentials": {
+        "googleCalendarOAuth2Api": {
+          "id": "REPLACE_WITH_GOOGLE_CALENDAR_CREDENTIAL_ID",
+          "name": "Google Calendar account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Compose the morning briefing email from the three source nodes.\n// Every fetcher continues on error, so guard every lookup defensively.\n\nconst weather = (() => {\n  try {\n    const item = $('Fetch Weather').item.json;\n    return item && item.current ? item.current : null;\n  } catch (e) {\n    return null;\n  }\n})();\n\nconst events = (() => {\n  try {\n    return $('Fetch Calendar').all().map((i) => i.json);\n  } catch (e) {\n    return null;\n  }\n})();\n\nconst tasks = (() => {\n  try {\n    return $('Fetch Tasks').all().map((i) => i.json);\n  } catch (e) {\n    return null;\n  }\n})();\n\n// WMO weather code -> Spanish label\nconst WEATHER_LABELS = {\n  0: 'Cielo despejado',\n  1: 'Mayormente despejado',\n  2: 'Parcialmente nublado',\n  3: 'Nublado',\n  45: 'Niebla',\n  48: 'Niebla con escarcha',\n  51: 'Llovizna ligera',\n  52: 'Llovizna',\n  53: 'Llovizna moderada',\n  55: 'Llovizna densa',\n  56: 'Llovizna helada ligera',\n  57: 'Llovizna helada',\n  61: 'Lluvia ligera',\n  63: 'Lluvia moderada',\n  65: 'Lluvia fuerte',\n  66: 'Lluvia helada ligera',\n  67: 'Lluvia helada',\n  71: 'Nieve ligera',\n  73: 'Nieve moderada',\n  75: 'Nieve fuerte',\n  77: 'Cristales de nieve',\n  80: 'Chubascos ligeros',\n  81: 'Chubascos',\n  82: 'Chubascos fuertes',\n  85: 'Chubascos de nieve ligera',\n  86: 'Chubascos de nieve',\n  95: 'Tormenta',\n  96: 'Tormenta con granizo',\n  99: 'Tormenta con granizo fuerte',\n};\n\nconst weatherLabel = weather && weather.weather_code !== undefined\n  ? WEATHER_LABELS[weather.weather_code] || 'Desconocido'\n  : 'No disponible';\n\nconst weatherLine = weather\n  ? `${weatherLabel}, ${Math.round(weather.temperature_2m)}C (sensacion ${Math.round(weather.apparent_temperature)}C), humedad ${weather.relative_humidity_2m}%, viento ${weather.wind_speed_10m} km/h`\n  : 'No disponible';\n\nconst eventLines = events && events.length\n  ? events\n      .slice()\n      .sort((a, b) => String(a.start && (a.start.dateTime || a.start.date)).localeCompare(String(b.start && (b.start.dateTime || b.start.date))))\n      .map((e) => {\n        const start = e.start || {};\n        const when = start.dateTime ? start.dateTime.slice(11, 16) : 'Todo el dia';\n        return `- ${when}  ${e.summary || 'Sin titulo'}`;\n      })\n  : ['- Sin eventos para hoy'];\n\nconst taskLines = tasks && tasks.length\n  ? tasks\n      .slice()\n      .sort((a, b) => String(a.due || '').localeCompare(String(b.due || '')))\n      .map((t) => `- [ ] ${t.title} (${t.due ? t.due.slice(0, 10) : 'sin fecha'})`)\n  : ['- Sin tareas pendientes'];\n\nconst subject = `Resumen matutino - ${$('Day Bounds').item.json.todayLabel}`;\nconst text = [\n  'Buenos dias!',\n  '',\n  'CLIMA (San Salvador)',\n  weatherLine,\n  '',\n  'EVENTOS DE HOY',\n  ...eventLines,\n  '',\n  'TAREAS PENDIENTES',\n  ...taskLines,\n].join('\\n');\n\nreturn [{ json: { subject, text } }];"
+      },
+      "id": "build-summary",
+      "name": "Build Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "executeOnce": true,
+      "position": [
+        1300,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "fromEmail": "REPLACE_WITH_SENDER_EMAIL",
+        "toEmail": "REPLACE_WITH_RECIPIENT_EMAIL",
+        "subject": "={{ $json.subject }}",
+        "emailType": "text",
+        "message": "={{ $json.text }}",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "id": "send-email",
+      "name": "Send Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2,
+      "position": [
+        1560,
+        220
+      ],
+      "credentials": {
+        "smtp": {
+          "id": "REPLACE_WITH_SMTP_CREDENTIAL_ID",
+          "name": "SMTP account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Every Day at 7 AM": {
+      "main": [
+        [
+          {
+            "node": "Day Bounds",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Day Bounds": {
+      "main": [
+        [
+          {
+            "node": "Fetch Weather",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Weather": {
+      "main": [
+        [
+          {
+            "node": "Fetch Tasks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Tasks": {
+      "main": [
+        [
+          {
+            "node": "Fetch Calendar",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Calendar": {
+      "main": [
+        [
+          {
+            "node": "Build Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Summary": {
+      "main": [
+        [
+          {
+            "node": "Send Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/El_Salvador"
+  }
+}
